@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Temperature Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Temperature Dashboard</h1>
+        <div class="settings">
+            <h2>Set Parameters</h2>
+            <form id="settings-form">
+                <label for="user_temp">Temperature Threshold:</label>
+                <input type="number" id="user_temp" name="user_temp" value="30">
+                <br>
+                <label for="user_light">Light Trigger Time:</label>
+                <input type="time" id="user_light" name="user_light" value="18:30">
+                <br>
+                <label for="light_duration">Light Duration (h:m):</label>
+                <input type="text" id="light_duration" name="light_duration" value="4h">
+                <br>
+                <button type="submit">Update Settings</button>
+            </form>
+        </div>
+        <div id="graph-container">
+            <h2>Temperature Graph</h2>
+            <canvas id="temperatureGraph"></canvas>
+            <br>
+            <label for="data-range">Data Range:</label>
+            <input type="range" id="data-range" min="0" max="30" step="1" value="10">
+            <span id="range-value">0-10</span>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
