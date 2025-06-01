@@ -1,97 +1,113 @@
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi import Query
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-from tinydb import TinyDB, Query as Q
-from operator import itemgetter
-import requests
-import re
+from datetime import datetime, time, timedelta
+from typing import Optional, List
+import uvicorn
+from collections import deque
+import random
 
 app = FastAPI()
 
-# Add this right after creating your FastAPI app
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-db = TinyDB("db.json")
-settings_table = db.table("settings")
-readings_table = db.table("readings")
+# In-memory database (replace with real database in production)
+current_settings = {
+    "user_temp": 25.0,  # Default temperature trigger
+    "user_light": "18:30:00",
+    "light_time_off": "22:30:00",
+    "_id": "1"
+}
 
-class SensorData(BaseModel):
-    temperature: float
-    presence: bool
+# Store historical data (circular buffer)
+MAX_HISTORY = 1000  # Maximum number of records to store
+sensor_history = deque(maxlen=MAX_HISTORY)
 
+# Data model for settings
 class Settings(BaseModel):
     user_temp: float
-    user_light: str  # 'sunset' or 'HH:MM:SS'
-    light_duration: str  # '4h'
+    user_light: str
+    light_duration: str
 
-def parse_time(time_str):
-    regex = re.compile(r'((?P<hours>\d+?)h)?((?P<minutes>\d+?)m)?')
-    parts = regex.match(time_str)
-    time_params = {k: int(v) for k, v in parts.groupdict().items() if v}
-    return timedelta(**time_params)
+# Data model for sensor readings
+class SensorReading(BaseModel):
+    temperature: float
+    presence: bool
+    datetime: str
 
-def get_sunset_time():
-    # Dummy value for now, should use location-based API in production
-    return datetime.now().replace(hour=17, minute=45, second=0)
+# Endpoint to get current settings
+@app.get("/settings")
+async def get_settings():
+    return current_settings
 
+# Endpoint to update settings
 @app.put("/settings")
-def set_settings(s: Settings):
-    light_on_time = get_sunset_time() if s.user_light == "sunset" else datetime.strptime(s.user_light, "%H:%M:%S")
-    light_off_time = (light_on_time + parse_time(s.light_duration)).time()
-
-    doc = {
-        "user_temp": s.user_temp,
-        "user_light": light_on_time.time().strftime("%H:%M:%S"),
-        "light_time_off": light_off_time.strftime("%H:%M:%S"),
-    }
-    settings_table.truncate()
-    settings_table.insert(doc)
-    return doc
-
-@app.post("/update")
-def update_state(data: SensorData):
-    now = datetime.now()
-    settings = settings_table.all()[0]
-
-    light_on = settings["user_light"]
-    light_off = settings["light_time_off"]
-    user_temp = settings["user_temp"]
-
-    current_time = now.time()
-    is_light_time = light_on <= current_time.strftime("%H:%M:%S") <= light_off
-    should_light = data.presence and is_light_time
-    should_fan = data.presence and data.temperature >= user_temp
-
-    readings_table.insert({
-        "temperature": data.temperature,
-        "presence": data.presence,
-        "datetime": now.isoformat()
-    })
+async def update_settings(settings: Settings):
+    # Update temperature trigger
+    current_settings["user_temp"] = settings.user_temp
     
-    print("Saved reading:", data.temperature, data.presence, now.isoformat())
-    return {"fan": should_fan, "light": should_light}
+    # Handle light time (simplified - sunset calculation would go here)
+    if settings.user_light.lower() == "sunset":
+        # In a real implementation, you'd call a sunset API here
+        sunset_time = "18:45:00"  # Placeholder
+        current_settings["user_light"] = sunset_time
+    else:
+        current_settings["user_light"] = settings.user_light
+    
+    # Calculate light off time (simplified)
+    duration = settings.light_duration
+    try:
+        # Parse duration (simplified version of your regex example)
+        if "h" in duration:
+            hours = int(duration.split("h")[0])
+            off_time = add_hours_to_time(current_settings["user_light"], hours)
+            current_settings["light_time_off"] = off_time
+    except:
+        current_settings["light_time_off"] = "22:30:00"  # Default if parsing fails
+    
+    return current_settings
 
+# Endpoint to receive sensor data from ESP32
+@app.post("/sensor-data")
+async def receive_sensor_data(reading: SensorReading):
+    # Add new reading to history
+    sensor_history.append({
+        "temperature": reading.temperature,
+        "presence": reading.presence,
+        "datetime": reading.datetime
+    })
+    return {"status": "success"}
+
+# Endpoint to get historical data for graphing
 @app.get("/graph")
-def get_graph(size: int = Query(10)):
-    all_data = readings_table.all()
-    sliced_data = all_data[-size:]
+async def get_graph_data(size: int = Query(10, gt=0, le=MAX_HISTORY)):
+    # Return the most recent 'size' readings
+    recent_readings = list(sensor_history)[-size:]
+    return recent_readings
 
-    # Ensure datetime and other fields are JSON-serializable
-    safe_data = []
-    for item in sliced_data:
-        safe_data.append({
-            "temperature": item.get("temperature"),
-            "presence": item.get("presence"),
-            "datetime": str(item.get("datetime"))  # ensure it's a string
+def add_hours_to_time(time_str: str, hours: int) -> str:
+    """Helper function to add hours to a time string"""
+    try:
+        t = datetime.strptime(time_str, "%H:%M:%S").time()
+        new_hour = (t.hour + hours) % 24
+        return f"{new_hour:02d}:{t.minute:02d}:{t.second:02d}"
+    except:
+        return "22:30:00"  # Default if parsing fails
+
+if __name__ == "__main__":
+    # Initialize with some dummy data for testing
+    for i in range(24):
+        sensor_history.append({
+            "temperature": random.uniform(20.0, 30.0),
+            "presence": random.choice([True, False]),
+            "datetime": (datetime.now() - timedelta(hours=i)).isoformat()
         })
-
-    return JSONResponse(content=safe_data)
+    
+    uvicorn.run(app, host="0.0.0.0", port=8000)
