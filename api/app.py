@@ -1,11 +1,14 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, time, timedelta
-from typing import Optional, List
+from typing import List, Optional
+import re
 import uvicorn
 from collections import deque
-import random
+from astral import LocationInfo
+from astral.sun import sun
+import pytz
 
 app = FastAPI()
 
@@ -18,96 +21,116 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory database (replace with real database in production)
+# Updated for Jamaica
+LOCATION = LocationInfo(
+    timezone="America/Jamaica",
+    latitude=18.1096,   # Jamaica's approximate latitude
+    longitude=-77.2975, # Jamaica's approximate longitude
+    name="Jamaica"
+)
+
+# Dictionary to simulate settings database
 current_settings = {
-    "user_temp": 25.0,  # Default temperature trigger
+    "user_temp": 25.0,
     "user_light": "18:30:00",
     "light_time_off": "22:30:00",
-    "_id": "1"
+    "_id": "1",
+    "original_light": "18:30:00"
 }
 
-# Store historical data (circular buffer)
-MAX_HISTORY = 1000  # Maximum number of records to store
-sensor_history = deque(maxlen=MAX_HISTORY)
+sensor_data = deque(maxlen=1000)
 
-# Data model for settings
+class SensorReading(BaseModel):
+    temperature: float
+    presence: bool
+    timestamp: str
+
+def get_sunset_time():
+    """Get today's sunset time for Jamaica"""
+    try:
+        tz = pytz.timezone(LOCATION.timezone)
+        today = datetime.now(tz).date()
+        
+        s = sun(LOCATION.observer, date=today, tzinfo=tz)
+        
+        # Convert to Jamaica time and format
+        sunset_jamaica = s["sunset"].astimezone(tz)
+        return sunset_jamaica.strftime("%H:%M:%S")
+    except Exception as e:
+        print(f"Error calculating sunset: {e}")
+        return "18:45:00"  # Fallback value
+
+@app.post("/temperature")
+async def receive_temperature(reading: SensorReading):
+    try:
+        record = {
+            "temperature": float(f"{reading.temperature:.1f}"),
+            "presence": reading.presence,
+            "timestamp": reading.timestamp,
+            "datetime": datetime.now().replace(microsecond=0).isoformat(),
+            "server_received": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        sensor_data.append(record)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/graph")
+async def get_graph_data(size: int = Query(10, gt=0, le=1000)):
+    recent_data = list(sensor_data)[-size:]
+    formatted_data = [{
+        "temperature": entry["temperature"],
+        "presence": entry["presence"],
+        "datetime": entry["datetime"]
+    } for entry in recent_data]
+    return formatted_data
+
 class Settings(BaseModel):
     user_temp: float
     user_light: str
     light_duration: str
 
-# Data model for sensor readings
-class SensorReading(BaseModel):
-    temperature: float
-    presence: bool
-    datetime: str
+def parse_duration(time_str):
+    regex = re.compile(r'((?P<hours>\d+?)h)?((?P<minutes>\d+?)m)?((?P<seconds>\d+?)s)?')
+    parts = regex.match(time_str)
+    if not parts:
+        return None
+    parts = parts.groupdict()
+    time_params = {}
+    for name, param in parts.items():
+        if param:
+            time_params[name] = int(param)
+    return timedelta(**time_params)
 
-# Endpoint to get current settings
 @app.get("/settings")
 async def get_settings():
     return current_settings
 
-# Endpoint to update settings
 @app.put("/settings")
 async def update_settings(settings: Settings):
-    # Update temperature trigger
     current_settings["user_temp"] = settings.user_temp
     
-    # Handle light time (simplified - sunset calculation would go here)
     if settings.user_light.lower() == "sunset":
-        # In a real implementation, you'd call a sunset API here
-        sunset_time = "18:45:00"  # Placeholder
+        sunset_time = get_sunset_time()
+        print(f"Calculated sunset time for Jamaica: {sunset_time}")  # Debug output
         current_settings["user_light"] = sunset_time
+        current_settings["original_light"] = "sunset"
     else:
         current_settings["user_light"] = settings.user_light
+        current_settings["original_light"] = settings.user_light
     
-    # Calculate light off time (simplified)
-    duration = settings.light_duration
-    try:
-        # Parse duration (simplified version of your regex example)
-        if "h" in duration:
-            hours = int(duration.split("h")[0])
-            off_time = add_hours_to_time(current_settings["user_light"], hours)
-            current_settings["light_time_off"] = off_time
-    except:
-        current_settings["light_time_off"] = "22:30:00"  # Default if parsing fails
+    duration = parse_duration(settings.light_duration)
+    if duration:
+        try:
+            light_on = datetime.strptime(current_settings["user_light"], "%H:%M:%S")
+            light_off = (light_on + duration).time()
+            current_settings["light_time_off"] = light_off.strftime("%H:%M:%S")
+        except:
+            current_settings["light_time_off"] = "22:30:00"
+    else:
+        current_settings["light_time_off"] = "22:30:00"
     
     return current_settings
 
-# Endpoint to receive sensor data from ESP32
-@app.post("/sensor-data")
-async def receive_sensor_data(reading: SensorReading):
-    # Add new reading to history
-    sensor_history.append({
-        "temperature": reading.temperature,
-        "presence": reading.presence,
-        "datetime": reading.datetime
-    })
-    return {"status": "success"}
-
-# Endpoint to get historical data for graphing
-@app.get("/graph")
-async def get_graph_data(size: int = Query(10, gt=0, le=MAX_HISTORY)):
-    # Return the most recent 'size' readings
-    recent_readings = list(sensor_history)[-size:]
-    return recent_readings
-
-def add_hours_to_time(time_str: str, hours: int) -> str:
-    """Helper function to add hours to a time string"""
-    try:
-        t = datetime.strptime(time_str, "%H:%M:%S").time()
-        new_hour = (t.hour + hours) % 24
-        return f"{new_hour:02d}:{t.minute:02d}:{t.second:02d}"
-    except:
-        return "22:30:00"  # Default if parsing fails
-
 if __name__ == "__main__":
-    # Initialize with some dummy data for testing
-    for i in range(24):
-        sensor_history.append({
-            "temperature": random.uniform(20.0, 30.0),
-            "presence": random.choice([True, False]),
-            "datetime": (datetime.now() - timedelta(hours=i)).isoformat()
-        })
-    
     uvicorn.run(app, host="0.0.0.0", port=8000)
