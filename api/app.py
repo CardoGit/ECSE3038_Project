@@ -21,7 +21,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Updated for Jamaica
 LOCATION = LocationInfo(
     timezone="America/Jamaica",
     latitude=18.1096,   # Jamaica's approximate latitude
